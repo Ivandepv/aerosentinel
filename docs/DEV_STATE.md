@@ -11,7 +11,7 @@
 | Phase | Status | Notes |
 |---|---|---|
 | 0 — Data Collection | ✅ Done | ~260K records, `data/training_data/flights_dataset.csv` |
-| 1 — ML Model Training | ⚠️ Ready to run | Script written, not yet executed on Linux machine |
+| 1 — ML Model Training | ✅ Done | 10-feature Isolation Forest, 317,809 records, 3 data fixes applied |
 | 2 — FastAPI Backend | 🔲 Not started | — |
 | 3 — Next.js Frontend | 🔲 Not started | — |
 | 4 — Telegram Alerts | 🔲 Not started | — |
@@ -19,15 +19,16 @@
 
 ---
 
-## Immediate Next Step — Run the Training Script
-
-On the development machine (Arch Linux, RTX 4050, CUDA):
+## Immediate Next Step — Build the FastAPI Backend
 
 ```bash
-cd aerosentinel
-pip install pandas numpy scikit-learn joblib matplotlib
-python ml/train_model.py
+mkdir -p backend/routes backend/alerts
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install fastapi uvicorn[standard] httpx scikit-learn joblib pandas python-dotenv
 ```
+
+Full spec in §Phase 2 below.
 
 Expected outputs:
 - `models/model.pkl` — trained Isolation Forest
@@ -52,7 +53,7 @@ python ml/train_model.py 0.03   # override contamination
 - **n_jobs:** -1 (all CPU cores)
 - **GPU:** RAPIDS cuML attempted at import, falls back to sklearn. Final `.pkl` is always sklearn-compatible for Pi deployment.
 
-### Features (9 total)
+### Features (10 total)
 
 | Feature | Source | Notes |
 |---|---|---|
@@ -62,9 +63,26 @@ python ml/train_model.py 0.03   # override contamination
 | `Longitude` | Raw ADS-B | — |
 | `alt_speed_ratio` | Derived | `Altitude_ft / (Speed_kt + 1)` — physics correlation |
 | `dist_from_RCNN` | Derived | Haversine distance to Tainan Airport (22.9508°N, 120.2061°E) |
-| `alt_change` | Derived | Per-aircraft rolling altitude delta, clipped ±5000 ft |
-| `speed_change` | Derived | Per-aircraft rolling speed delta, clipped ±200 kt |
+| `alt_change` | Derived | Per-aircraft rolling altitude delta, gap-corrected, clipped ±5000 ft |
+| `speed_change` | Derived | Per-aircraft rolling speed delta, gap-corrected, clipped ±200 kt |
 | `hour_of_day` | Derived | `hour + minute/60` — time context |
+| `near_airport` | Derived | 1 if within 15 km of RCNN AND alt < 5,000 ft — approach/departure zone flag |
+
+### Data cleaning pipeline (3 stages)
+
+| Stage | What it removes | Records removed |
+|---|---|---|
+| Physics limits + nulls | Missing fields, speed 0–30 kt, alt ≤ 0 or > 55,000 ft | 82,957 |
+| Bbox edge margin (0.1°) | Flights entering/exiting monitored zone — false delta spikes | 19,202 |
+| SDR gap correction (> 30s) | Per-flight records after a receiver dropout — zeroes bad deltas | 2,669 corrected |
+
+### Training results (final)
+
+- **Records trained on:** 317,809
+- **Normal:** 311,454 (98.00%)
+- **Anomaly:** 6,355 (2.00%)
+- **Training time:** ~5s (CPU, all cores)
+- **Top anomaly:** CAL177 — 344.8 kt at 3,975 ft, −1,675 ft/cycle descent (score −0.11)
 
 ### Rule-based hybrid layer (in `live_detection.py`)
 

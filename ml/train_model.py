@@ -36,6 +36,9 @@ REPORTS_DIR = ROOT / "reports"
 RCNN_LAT, RCNN_LON = 22.9508, 120.2061   # Tainan Airport
 LAT_MIN, LAT_MAX   = 21.5,  23.5
 LON_MIN, LON_MAX   = 119.5, 121.5
+EDGE_MARGIN        = 0.1                  # degrees — strips ~11 km from each bbox edge
+NEAR_AIRPORT_KM    = 15.0                 # radius around RCNN considered "approach zone"
+NEAR_AIRPORT_ALT   = 5_000               # ft — below this = low-altitude near airport
 
 FEATURES = [
     "Altitude_ft",
@@ -47,6 +50,7 @@ FEATURES = [
     "alt_change",
     "speed_change",
     "hour_of_day",
+    "near_airport",
 ]
 
 # ── GPU detection ──────────────────────────────────────────────────────────────
@@ -86,7 +90,17 @@ def load_and_clean(path: Path) -> pd.DataFrame:
         (df["Longitude"] >= LON_MIN) & (df["Longitude"] <= LON_MAX)
     ]
 
+    # Edge margin — remove records within EDGE_MARGIN degrees of the bbox boundary.
+    # Flights entering/exiting the monitored zone have no prior position, so their
+    # rolling alt_change and speed_change spike to extreme values — these are
+    # measurement artifacts, not real anomalies.
+    before_edge = len(df)
+    df = df[
+        (df["Latitude"]  >= LAT_MIN + EDGE_MARGIN) & (df["Latitude"]  <= LAT_MAX - EDGE_MARGIN) &
+        (df["Longitude"] >= LON_MIN + EDGE_MARGIN) & (df["Longitude"] <= LON_MAX - EDGE_MARGIN)
+    ]
     print(f"  After cleaning    : {len(df):>10,}  ({len(df)/raw_count*100:.1f}% retained)")
+    print(f"  Edge margin drop  : {before_edge - len(df):>10,}  (bbox boundary artifacts removed)")
     return df.reset_index(drop=True)
 
 
@@ -118,6 +132,25 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["alt_change"]   = grp["Altitude_ft"].diff().fillna(0).clip(-5_000, 5_000)
     df["speed_change"] = grp["Speed_kt"].diff().fillna(0).clip(-200, 200)
 
+    # SDR gap correction — when an aircraft drops out of receiver range and
+    # reappears, the delta between the last and first record spans minutes, not
+    # 2 seconds. The resulting alt_change / speed_change values are measurement
+    # artifacts. Zero them out for any gap longer than 30 seconds.
+    time_gap_sec = grp["Timestamp"].diff().dt.total_seconds().fillna(0)
+    gap_mask = time_gap_sec > 30
+    n_gaps = gap_mask.sum()
+    df.loc[gap_mask, "alt_change"]   = 0.0
+    df.loc[gap_mask, "speed_change"] = 0.0
+
+    # near_airport — 1 if the aircraft is within NEAR_AIRPORT_KM of RCNN AND
+    # below NEAR_AIRPORT_ALT ft. Tells the model that low+slow behavior near
+    # the airport is an expected approach/departure pattern, not an anomaly.
+    df["near_airport"] = (
+        (df["dist_from_RCNN"] <= NEAR_AIRPORT_KM) &
+        (df["Altitude_ft"]    <= NEAR_AIRPORT_ALT)
+    ).astype(float)
+
+    print(f"  SDR gap corrections  : {n_gaps:>6,}  (delta zeroed where gap > 30s)")
     print(f"  Features ({len(FEATURES)}): {', '.join(FEATURES)}")
     for f in FEATURES:
         print(f"    {f:<20}  min={df[f].min():>10.2f}  max={df[f].max():>10.2f}  "
