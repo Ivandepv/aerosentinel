@@ -1,0 +1,40 @@
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+
+# ── Claude Code local config (never push AI assistant state) ─────────
+.claude/
+
+# ── ML model artifacts (rebuild with: python ml/train_model.py) ──────
+models/model.pkl
+models/scaler.pkl
+models/features.pkl
+models/flight_anomaly_model.pkl
+
+# ── Generated / runtime outputs ──────────────────────────────────────
+reports/
+data/flight_data/live_predictions.csv
+
+# ── Duplicate dataset in root ─────────────────────────────────────────
+dataset_vuelos.csv
+
+# ── Secrets (Telegram bot token, etc.) ───────────────────────────────
+.env
+.env.local
+.env.*
+
+# ── IDE local settings ────────────────────────────────────────────────
+.vscode/settings.json
+*.code-workspace
+
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
