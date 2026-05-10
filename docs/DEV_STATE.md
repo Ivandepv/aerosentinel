@@ -12,35 +12,45 @@
 |---|---|---|
 | 0 — Data Collection | ✅ Done | ~260K records, `data/training_data/flights_dataset.csv` |
 | 1 — ML Model Training | ✅ Done | 10-feature Isolation Forest, 317,809 records, 3 data fixes applied |
-| 2 — FastAPI Backend | 🔲 Not started | — |
-| 3 — Next.js Frontend | 🔲 Not started | — |
-| 4 — Telegram Alerts | 🔲 Not started | — |
+| 2 — FastAPI Backend | ✅ Done | `backend/` — REST + WebSockets + SQLite WAL + ADS-B simulator |
+| 3 — Next.js Frontend | ✅ Done | `frontend/` — live map, flight panel, anomaly log, vivid UI |
+| 4 — Telegram Alerts | 🔲 Not started | **← NEXT** |
 | 5 — Pi Deployment | 🔲 Not started | — |
 
 ---
 
-## Immediate Next Step — Build the FastAPI Backend
+## Immediate Next Step — Telegram Alerts (Phase 4)
+
+Build `backend/alerts/`. Requires:
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set in `backend/.env`
+- Playwright (headless Chromium) for map screenshots
+- 5-minute per-aircraft cooldown to avoid spam
 
 ```bash
-mkdir -p backend/routes backend/alerts
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install fastapi uvicorn[standard] httpx scikit-learn joblib pandas python-dotenv
+cd backend && source venv/bin/activate
+pip install playwright httpx
+playwright install chromium
 ```
 
-Full spec in §Phase 2 below.
+See `docs/AEROSENTINEL_ROADMAP.md` §Phase 4 for full implementation spec.
 
-Expected outputs:
-- `models/model.pkl` — trained Isolation Forest
-- `models/scaler.pkl` — StandardScaler fitted on training data
-- `models/features.pkl` — ordered feature name list
-- `reports/anomaly_validation.png` — 3-panel validation plot
+> **To run the full dev stack:**
+> ```bash
+> # Terminal 1 — ADS-B simulator (mimics readsb on port 30047)
+> cd backend && source venv/bin/activate && python simulator.py
+>
+> # Terminal 2 — FastAPI backend
+> cd backend && source venv/bin/activate && uvicorn main:app --reload --port 8000
+>
+> # Terminal 3 — Next.js frontend
+> cd frontend && npm run dev
+> ```
+> Dashboard: http://localhost:3000 · API: http://localhost:8000
 
-Review the contamination sweep output and the validation plot. If anomaly % looks wrong, re-run with a different contamination value:
-
-```bash
-python ml/train_model.py 0.03   # override contamination
-```
+> **Rebuild model artifacts anytime with:**
+> ```bash
+> python ml/train_model.py
+> ```
 
 ---
 
@@ -84,7 +94,7 @@ python ml/train_model.py 0.03   # override contamination
 - **Training time:** ~5s (CPU, all cores)
 - **Top anomaly:** CAL177 — 344.8 kt at 3,975 ft, −1,675 ft/cycle descent (score −0.11)
 
-### Rule-based hybrid layer (in `live_detection.py`)
+### Rule-based hybrid layer (`backend/inference.py`)
 
 Applied on top of ML predictions. Any rule hit → `ANOMALY` regardless of ML score.
 
@@ -98,78 +108,90 @@ Applied on top of ML predictions. Any rule hit → `ANOMALY` regardless of ML sc
 
 ---
 
-## Phase 2 — FastAPI Backend
+## Phase 2 — FastAPI Backend ✅
 
-Build `backend/` directory. Key components:
-
-### 2.1 Directory structure to create
+### Directory structure (built)
 ```
 backend/
-├── main.py              ← FastAPI app entry point
-├── collector.py         ← ADS-B poller (replaces live_detection.py)
-├── inference.py         ← Load model artifacts, run predict()
-├── database.py          ← SQLite setup (WAL mode)
+├── main.py          ← FastAPI app, lifespan startup (DB → model → collector task)
+├── collector.py     ← Async loop: polls readsb every 2s, runs inference, writes DB, broadcasts WS
+├── inference.py     ← InferenceEngine with per-aircraft rolling state; includes near_airport fix
+├── database.py      ← SQLite WAL via aiosqlite, get_db() dependency
+├── schemas.py       ← Pydantic models for all API responses
+├── simulator.py     ← Local dev: mimics readsb on port 30047 with 6 aircraft (2 anomalies)
 ├── routes/
-│   ├── aircraft.py      ← GET /api/aircraft, /api/aircraft/{icao24}
-│   ├── anomalies.py     ← GET /api/anomalies, /api/stats
-│   └── websocket.py     ← WS /ws/live, WS /ws/alerts
-├── schemas.py           ← Pydantic models
-└── requirements.txt
+│   ├── aircraft.py  ← GET /api/aircraft, GET /api/aircraft/{icao24}
+│   ├── anomalies.py ← GET /api/anomalies, GET /api/stats
+│   └── websocket.py ← WS /ws/live, WS /ws/alerts + ConnectionManager
+├── requirements.txt
+└── .env             ← copy and fill TELEGRAM_* before Phase 4
 ```
 
-### 2.2 SQLite schema (implement in `database.py`)
-```sql
-CREATE TABLE flights (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp     TEXT NOT NULL,
-    icao24        TEXT NOT NULL,
-    callsign      TEXT,
-    altitude_ft   REAL,
-    speed_kt      REAL,
-    vertical_rate REAL,
-    latitude      REAL,
-    longitude     REAL,
-    track         REAL,
-    is_anomaly    INTEGER DEFAULT 0,
-    anomaly_score REAL,
-    anomaly_reason TEXT
-);
+### REST endpoints
 
-CREATE TABLE anomalies (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    flight_id       INTEGER REFERENCES flights(id),
-    detected_at     TEXT NOT NULL,
-    icao24          TEXT,
-    callsign        TEXT,
-    reason          TEXT,
-    screenshot_path TEXT,
-    notified        INTEGER DEFAULT 0
-);
-```
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/health` | `{"status":"ok"}` |
+| GET | `/api/aircraft` | All aircraft seen in last 30 s |
+| GET | `/api/aircraft/{icao24}` | Position history for one aircraft (last 10 min) |
+| GET | `/api/anomalies` | All anomaly events in last 24 h |
+| GET | `/api/stats` | Aircraft count, anomaly rate, uptime |
+| WS  | `/ws/live` | Aircraft update every 2 s |
+| WS  | `/ws/alerts` | Anomaly alert pushed immediately on detection |
 
-### 2.3 WebSocket message formats
-See `docs/AEROSENTINEL_ROADMAP.md` §2.3 for full JSON schemas.
+### Simulator aircraft
 
-### 2.4 Key requirements
-```
-fastapi uvicorn[standard] httpx scikit-learn joblib pandas sqlite3 python-dotenv
-```
-
-### 2.5 ADS-B source
-On Raspberry Pi: `readsb` exposes JSON at `http://localhost:30047/data/aircraft.json`
-For local dev/testing: simulate with a static JSON file from the dataset.
+| ICAO | Callsign | Behavior |
+|---|---|---|
+| 899076 | EVA384 | Normal cruise, 29,000 ft / 456 kt |
+| b80211 | CAL102 | Normal approach, 3,500 ft / 200 kt |
+| 7c1234 | MDA878 | Normal climb, 12,000 ft / 320 kt |
+| 4ca100 | UNI666 | Normal high cruise, 35,000 ft / 500 kt |
+| cf0077 | TTW007 | **ANOMALY: HIGH_SPEED_LOW_ALT** — 520 kt @ 1,500 ft (fires every poll) |
+| 899177 | CAL177 | **ANOMALY: EXTREME_DESCENT** — drops 2,100 ft/tick (fires from 2nd poll) |
 
 ---
 
-## Phase 3 — Next.js Frontend
+## Phase 3 — Next.js Frontend ✅
 
-Build `frontend/` directory. Stack: Next.js 14, React 18, TypeScript, Leaflet.js, shadcn/ui, Tailwind, Zustand, Recharts.
+### Directory structure (built)
+```
+frontend/
+├── app/
+│   ├── layout.tsx      ← Root layout, dark navy background
+│   ├── page.tsx        ← 3-column layout (flight details | map | table+log)
+│   └── globals.css     ← Tailwind + glass panels + leaflet overrides + dot-grid bg
+├── components/
+│   ├── Map/
+│   │   ├── MapClient.tsx        ← Leaflet map (dynamic, ssr:false), altitude-colored markers
+│   │   └── AltitudeColorBar.tsx ← Rainbow altitude scale at map bottom
+│   ├── StatsBar.tsx     ← Gradient logo, live pill, colored stat chips
+│   ├── FlightPanel.tsx  ← Left panel: selected AC details + altitude bar + recharts chart
+│   ├── AircraftTable.tsx← Right panel: sortable table, altitude-colored values, orange highlights
+│   ├── AnomalyLog.tsx   ← Right panel: severity-colored anomaly entries with left border
+│   └── AnomalyBanner.tsx← Floating slide-in alert banner, auto-dismiss 8 s
+├── hooks/
+│   └── useLiveAircraft.ts ← Dual WS: /ws/live + /ws/alerts, auto-reconnect
+├── store/
+│   └── aircraft.ts     ← Zustand: aircraft[], trails[], altHistory[], anomalies[], selected
+├── lib/
+│   └── altitude.ts     ← altitudeColor(ft) → rainbow hex, ALT_SCALE constant
+├── types/
+│   └── index.ts        ← Aircraft, AnomalyAlert TypeScript interfaces
+├── .env.local          ← NEXT_PUBLIC_API_URL, NEXT_PUBLIC_WS_URL
+└── package.json
+```
 
-Key components: `<Map>`, `<AircraftMarker>`, `<AnomalyMarker>`, `<FlightPanel>`, `<AnomalyLog>`, `<StatsBar>`, `<AnomalyBanner>`.
-
-WebSocket hook connects to `ws://[PI_IP]:8000/ws/live`.
-
-See `docs/AEROSENTINEL_ROADMAP.md` §3 for full layout spec and code snippets.
+### UI design notes
+- **Background:** Deep navy gradient `#050b1f → #080f28` + cyan dot-grid texture
+- **Panels:** Glassmorphism (`rgba + backdrop-blur`) with colored glowing borders
+  - Left panel: cyan border (`#22d3ee`)
+  - Right panel: orange border (`#f97316`)
+- **Logo:** Gradient text (purple → cyan → orange)
+- **Aircraft markers:** ✈️ emoji inside altitude-colored glowing ring
+- **Trails:** Polylines colored by altitude spectrum
+- **Altitude colors:** Red (low) → Orange → Yellow → Green → Cyan → Blue → Purple (high)
+- **Anomaly markers:** Red pulsing ring with `box-shadow` glow animation
 
 ---
 
@@ -189,10 +211,10 @@ See `docs/AEROSENTINEL_ROADMAP.md` §4 for full implementation.
 Three systemd services: `readsb.service`, `aerosentinel-backend.service`, `aerosentinel-frontend.service`.
 
 Performance notes for Pi 5:
-- SQLite WAL mode
-- Keep last 20 positions per aircraft in memory
+- SQLite WAL mode (already implemented)
+- Keep last 20 positions per aircraft in memory (already implemented in Zustand store)
 - ML inference on separate thread pool
-- Next.js `output: 'standalone'`
+- Next.js `output: 'standalone'` (already set in `next.config.js`)
 
 ---
 
@@ -202,11 +224,15 @@ Performance notes for Pi 5:
 |---|---|
 | `ml/train_model.py` | Full training pipeline — run this first |
 | `ml/requirements.txt` | Training dependencies |
-| `live_detection.py` | Edge inference script (Pi, replaces the backend collector in prod) |
-| `data_recolection/dataset_collector.py` | Original ADS-B data logger |
-| `stress_test_model.py` | Quick model sanity check |
+| `backend/main.py` | FastAPI entry point — start here |
+| `backend/simulator.py` | Local ADS-B simulator (no Pi needed for dev) |
+| `backend/inference.py` | ML inference engine with rolling per-aircraft state |
+| `backend/collector.py` | Async ADS-B poll loop → DB → WebSocket broadcast |
+| `frontend/app/page.tsx` | Main dashboard layout |
+| `frontend/store/aircraft.ts` | Global state (Zustand) |
+| `live_detection.py` | Legacy edge inference script (Pi standalone, pre-backend) |
 | `data/training_data/flights_dataset.csv` | 7-day ADS-B dataset, ~260K records |
-| `models/` | Trained artifacts (gitignored, rebuild with train_model.py) |
+| `models/` | Trained artifacts (gitignored, rebuild with `ml/train_model.py`) |
 | `reports/` | Validation plots (gitignored, generated by train_model.py) |
 
 ---
@@ -221,7 +247,7 @@ Performance notes for Pi 5:
 
 ---
 
-## Environment Variables (create `.env` in `backend/` before Phase 2)
+## Environment Variables (`backend/.env`)
 
 ```env
 READSB_URL=http://localhost:30047/data/aircraft.json
@@ -232,6 +258,6 @@ SCALER_PATH=../models/scaler.pkl
 FEATURES_PATH=../models/features.pkl
 ANOMALY_COOLDOWN_SEC=300
 DASHBOARD_URL=http://localhost:3000
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+TELEGRAM_BOT_TOKEN=          ← fill before Phase 4
+TELEGRAM_CHAT_ID=            ← fill before Phase 4
 ```

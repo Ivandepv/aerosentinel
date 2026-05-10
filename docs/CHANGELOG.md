@@ -4,6 +4,105 @@ All notable changes to the project, newest first.
 
 ---
 
+## [Phase 3 complete] — 2026-05-10
+
+### Next.js Frontend — `frontend/`
+
+**Stack:** Next.js 14 · TypeScript · Leaflet.js · Zustand · Recharts · Tailwind CSS
+
+#### Layout
+- 3-column dashboard: Flight Details (left 218 px) | Live Map (center, flex) | Aircraft Table + Anomaly Log (right 332 px)
+- Floating anomaly banner slides in from top on new detection, auto-dismisses after 8 s
+- Fully responsive height — panels fill viewport with internal scroll
+
+#### Map (`components/Map/MapClient.tsx`)
+- Leaflet map centered on Tainan Airport (22.9508°N, 120.2061°E), zoom 10
+- CartoDB Dark Matter tiles
+- Aircraft rendered as ✈️ emoji inside altitude-colored glowing ring; ring rotates with track heading
+- Anomaly aircraft rendered with red pulsing ring (`box-shadow` animation)
+- Position trail polylines per aircraft (last 20 points), colored by altitude
+- Tainan Airport (RCNN) fixed marker
+- Altitude color bar overlay at map bottom — rainbow scale from red (0 ft) to purple (40k+ ft)
+
+#### State (`store/aircraft.ts`)
+- Zustand store: `aircraft[]`, `trails{}` (last 20 positions), `altHistory{}` (last 150 readings for chart), `anomalies[]`, `selected`, `connected`
+- `setAircraft()` updates trails and altitude history incrementally on every WebSocket push
+
+#### WebSocket (`hooks/useLiveAircraft.ts`)
+- Dual persistent connections: `/ws/live` (aircraft updates) + `/ws/alerts` (anomaly alerts)
+- Auto-reconnect with 3 s backoff on disconnect
+
+#### Components
+| Component | Description |
+|---|---|
+| `StatsBar` | Gradient logo (purple→cyan→orange), LIVE/OFFLINE pill, colored stat chips |
+| `FlightPanel` | Selected aircraft: gradient callsign, altitude progress bar, data rows colored by type, Recharts altitude history chart |
+| `AircraftTable` | Sortable by any column; altitude values colored by spectrum; orange left-border on selected row; red tint on anomaly rows |
+| `AnomalyLog` | Severity-colored left border per entry (red/orange/blue); timestamps in monospace |
+| `AnomalyBanner` | Gradient red glass banner, slides in from top, auto-dismisses |
+| `AltitudeColorBar` | Rainbow gradient bar with altitude labels, overlaid at map bottom |
+
+#### Visual design
+- **Background:** deep navy gradient (`#050b1f → #080f28`) + subtle cyan dot-grid texture
+- **Panels:** glassmorphism — `rgba(6,12,36,0.88)` + `backdrop-filter: blur(20px)` with colored glowing borders
+- **Altitude color scale:** `lib/altitude.ts` — 9-stop rainbow from `#ef4444` (0 ft) to `#c084fc` (40k+ ft)
+- **Data colors:** cyan = altitude, orange = speed/callsign, purple = track, green/red = score/vr
+
+---
+
+## [Phase 2 complete] — 2026-05-10
+
+### FastAPI Backend — `backend/`
+
+**Stack:** FastAPI · uvicorn · aiosqlite · httpx · scikit-learn · joblib · python-dotenv
+
+#### ADS-B Collector (`collector.py`)
+- Async loop polls `readsb` JSON endpoint every `POLL_INTERVAL_SEC` seconds (default 2 s)
+- Validates each aircraft record (filters `speed < 30 kt`, `alt ≤ 0`, missing position)
+- Calls `InferenceEngine.build_features()` then `predict()` for every aircraft per tick
+- Writes all records to `flights` table; anomaly records also written to `anomalies` table
+- Broadcasts aircraft list to all `/ws/live` subscribers every poll
+- Broadcasts anomaly alerts to all `/ws/alerts` subscribers immediately on detection
+
+#### Inference Engine (`inference.py`)
+- `InferenceEngine` class loads `model.pkl`, `scaler.pkl`, `features.pkl` on startup
+- Maintains per-aircraft rolling state (`prev_alt`, `prev_speed`) for delta features
+- Builds all 10 features including `near_airport` (missing from legacy `live_detection.py`)
+- Applies rule-based layer first; ML score used only when no rule fires
+- `predict()` returns `(is_anomaly: bool, score: float, reason: str | None)`
+
+#### Database (`database.py`)
+- SQLite with WAL journal mode for concurrent read performance
+- `init_db()` creates tables and indices on startup; called in FastAPI lifespan
+- `get_db()` async generator used as FastAPI `Depends()` in route handlers
+- Tables: `flights` (all records), `anomalies` (flagged events only)
+- Indices on `timestamp`, `icao24`, `is_anomaly`, `detected_at`
+
+#### REST API
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness check |
+| `GET /api/aircraft` | Latest position per aircraft seen in last 30 s |
+| `GET /api/aircraft/{icao24}` | Full position history for one aircraft (last 10 min) |
+| `GET /api/anomalies` | All anomaly events in last 24 h |
+| `GET /api/stats` | Live aircraft count, 24 h anomaly count + rate, uptime |
+| `WS /ws/live` | Pushes `aircraft_update` JSON every poll cycle |
+| `WS /ws/alerts` | Pushes `anomaly_alert` JSON immediately on detection |
+
+#### WebSocket `ConnectionManager` (`routes/websocket.py`)
+- Set-based connection tracking (O(1) add/remove)
+- Dead connection cleanup on broadcast failure
+- Separate manager instances for `/ws/live` and `/ws/alerts`
+
+#### ADS-B Simulator (`simulator.py`)
+- Standalone FastAPI app on port 30047 — drop-in replacement for `readsb` during local dev
+- Background thread advances all aircraft positions every 2 s
+- 6 aircraft: 4 normal flights, 2 hard-coded anomalies for end-to-end testing
+  - **TTW007:** HIGH_SPEED_LOW_ALT (520 kt @ 1,500 ft) — fires every poll
+  - **CAL177:** EXTREME_DESCENT (−2,100 ft/tick) — fires from 2nd poll
+
+---
+
 ## [Phase 1 complete] — 2026-05-10
 
 ### ML Training Pipeline — 3 fixes applied to `ml/train_model.py`

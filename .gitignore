@@ -35,6 +35,20 @@ dataset_vuelos.csv
 .vscode/settings.json
 *.code-workspace
 
+# ── Next.js ───────────────────────────────────────────────────────────
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+
+# ── Backend runtime data ──────────────────────────────────────────────
+backend/data/
+backend/__pycache__/
+backend/routes/__pycache__/
+backend/alerts/__pycache__/
+
+# ── Reference / design assets (not needed to run the project) ─────────
+adsbexchange_UIUX_reference.png
+
 # ── OS ────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
